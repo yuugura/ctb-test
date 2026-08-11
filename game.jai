@@ -1,3 +1,6 @@
+#load "util.jai";
+#load "osu.jai";
+
 CATCHER_SPEED :: 400.0; // pixels per second
 DASH_MULTIPLIER :: 1.8;
 
