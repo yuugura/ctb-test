@@ -1,6 +1,8 @@
 #import "Basic";
 #import "raylib";
 #import "Math";
+#import "File";
+#import "String";
 
 #load "game.jai";
 
@@ -17,6 +19,8 @@ main :: () {
     defer UnloadTexture(game.catcher_texture);
 
     SetExitKey(.KEY_NULL); // Auto: So the window doesn't close when pressing esc key
+
+    beatmap := read_osu_file("resources/test_map.osu");
 
     while !WindowShouldClose() {
         reset_temporary_storage(); // Auto: We need this if you're going to use tprint(), otherwise it will lead to memory leak because you keep allocating memory for string but never clears them. Read temporary storage in how_to for details. 
