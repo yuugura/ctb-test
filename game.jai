@@ -14,13 +14,22 @@ CATCHER_SINK_FRACTION :: 0.5;
 // and ppy/osu Catcher.cs) -- Circle Size drives both catcher and fruit
 // size through these, in "osu!pixels", converted to screen pixels via
 // OSU_TO_SCREEN so the two stay proportional to each other like in osu.
-BASE_SIZE           :: 106.75; // catcher base width, osu!pixels
-ALLOWED_CATCH_RANGE :: 0.8;
-OBJECT_RADIUS       :: 64.0;
-OSU_PLAYFIELD_WIDTH :: 512.0;
-OSU_TO_SCREEN       :: SCREEN_WIDTH / OSU_PLAYFIELD_WIDTH;
+BASE_SIZE            :: 106.75; // catcher base width, osu!pixels
+ALLOWED_CATCH_RANGE  :: 0.8;
+OBJECT_RADIUS        :: 64.0;
+OSU_PLAYFIELD_WIDTH  :: 512.0;
+OSU_PLAYFIELD_HEIGHT :: 384;
+OSU_TO_SCREEN        :: SCREEN_WIDTH / OSU_PLAYFIELD_WIDTH;
 
-MAX_FRUITS      :: 32;
+osu_to_screen :: (value: float) -> float {
+    return value * OSU_TO_SCREEN;
+}
+
+has_hit_object_type :: (hit_object: *Osu_Hit_Object, flag: Osu_Hit_Object_Type_Flag) -> bool {
+    return (hit_object.type & xx flag) != 0;
+}
+
+MAX_FRUITS      :: 48;
 FRUIT_FALL_SPEED :: 200.0; // pixels per second
 
 Keybind_Scheme :: enum {
@@ -81,7 +90,9 @@ init_game :: (osu_path: string) -> Game {
     game.catcher_texture = LoadTexture(get_c_string("resources/catcher.png"));
 
     game.beatmap = read_osu_file(osu_path);
-    game.difficulty.circle_size = game.beatmap.difficulty_info.CircleSize;
+    if game.beatmap.hit_objects.count > 0 {
+        game.difficulty.circle_size = game.beatmap.difficulty_info.CircleSize;
+    }
 
     return game;
 }
@@ -93,9 +104,9 @@ calculate_catcher_and_fruit_size :: (using game: *Game) {
     catcher_scale_osu := legacy_scale * 2.0;
     catch_width_osu   := BASE_SIZE * catcher_scale_osu * ALLOWED_CATCH_RANGE;
 
-    fruit_radius_screen      = fruit_radius_osu * OSU_TO_SCREEN;
-    catch_half_width_screen  = (catch_width_osu * OSU_TO_SCREEN) / 2.0;
-    catcher.size_screen.x    = BASE_SIZE * catcher_scale_osu * OSU_TO_SCREEN;
+    fruit_radius_screen      = osu_to_screen(fruit_radius_osu);
+    catch_half_width_screen  = osu_to_screen(catch_width_osu) / 2.0;
+    catcher.size_screen.x    = osu_to_screen(BASE_SIZE * catcher_scale_osu);
     catcher.draw_scale       = catcher.size_screen.x / cast(float) catcher_texture.width;
     catcher.size_screen.y    = cast(float) catcher_texture.height * catcher.draw_scale;
     catcher.position.y       = SCREEN_HEIGHT - catcher.size_screen.y * (1.0 - CATCHER_SINK_FRACTION);
@@ -122,9 +133,12 @@ update_fruits :: (using game: *Game, dt: float)
     run_time_ms += dt * 1000.0;
 
     while hit_cursor < beatmap.hit_objects.count && cast(float) beatmap.hit_objects[hit_cursor].time <= run_time_ms {
-        hit_object := beatmap.hit_objects[hit_cursor];
-        if hit_object.type & xx Osu_Hit_Object_Type_Flag.Hit_Circle {
-            spawn_fruit_at(*fruits, cast(float) hit_object.x * OSU_TO_SCREEN, fruit_radius_screen);
+        hit_object := *beatmap.hit_objects[hit_cursor];
+        if has_hit_object_type(hit_object, .Hit_Circle) {
+            if !spawn_fruit_at(*fruits, osu_to_screen(cast(float) hit_object.x), fruit_radius_screen) {
+                // Pool was full -- count it as a miss instead of silently losing the note.
+                missed_count += 1;
+            }
         }
         hit_cursor += 1;
     }
@@ -163,14 +177,15 @@ catching_fruits :: (using game: *Game) {
     }
 }
 
-spawn_fruit_at :: (fruits: *[MAX_FRUITS] Fruit, x: float, radius: float) {
+spawn_fruit_at :: (fruits: *[MAX_FRUITS] Fruit, x: float, radius: float) -> bool {
     for * fruit: fruits.* {
         if fruit.alive continue;
         fruit.x = x;
         fruit.y = -radius;
         fruit.alive = true;
-        return;
+        return true;
     }
+    return false;
 }
 
 update_game :: (using game: *Game) { 
@@ -216,6 +231,6 @@ render_game :: (using game: *Game) {
     DrawTextureEx(catcher_texture, Vector2.{ catcher.position.x, catcher.position.y }, 0, catcher.draw_scale, WHITE);
 
     for fruit: fruits {
-        if fruit.alive DrawCircleV(Vector2.{ fruit.x, fruit.y }, fruit_radius_screen, ORANGE);
+        if fruit.alive DrawCircleV(Vector2.{ fruit.x, fruit.y }, fruit_radius_screen, WHITE);
     }
 }

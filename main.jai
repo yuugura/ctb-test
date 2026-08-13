@@ -6,11 +6,11 @@
 
 #load "game.jai";
 
-SCREEN_WIDTH  :: 800;
-SCREEN_HEIGHT :: 450;
+SCREEN_WIDTH  :: 1024;
+SCREEN_HEIGHT :: SCREEN_WIDTH * OSU_PLAYFIELD_HEIGHT / OSU_PLAYFIELD_WIDTH; // keeps osu!'s 512:384 playfield ratio
 
 main :: () {
-    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, get_c_string("osu!Catch - Catcher"));
+    InitWindow(SCREEN_WIDTH, cast(s32) SCREEN_HEIGHT, get_c_string("osu!Catch - Catcher"));
     defer CloseWindow();
 
     SetTargetFPS(60);
@@ -31,21 +31,21 @@ main :: () {
         // 7. Draw
         PushDrawing();
 
-        ClearBackground(RAYWHITE); // Auto: wtf who tf plays osu with full white background
+        ClearBackground(BLACK);
         render_game(*game);
 
         scheme_name := "Arrows + LShift";
         if input_scheme == .WASD scheme_name = "A/D + RShift";
 
-        DrawText(get_c_string(tprint("Circle Size: % (- / +)", difficulty.circle_size)), 10, 10, 20, BLACK);
-        DrawText(get_c_string(tprint("Keybinds: % (Tab to switch)", scheme_name)), 10, 30, 20, BLACK);
-        DrawText(get_c_string(tprint("Caught: %   Missed: %", caught_count, missed_count)), 10, 50, 20, BLACK);
+        DrawText(get_c_string(tprint("Circle Size: % (- / +)", difficulty.circle_size)), 10, 10, 20, WHITE);
+        DrawText(get_c_string(tprint("Keybinds: % (Tab to switch)", scheme_name)), 10, 30, 20, WHITE);
+        DrawText(get_c_string(tprint("Caught: %   Missed: %", caught_count, missed_count)), 10, 50, 20, WHITE);
 
         if game.state == .Paused {
             font_size := 50;
             paused_text := temp_c_string("PAUSED");
             text_width := MeasureText(paused_text, xx font_size);
-            DrawText("PAUSED", (SCREEN_WIDTH - text_width) / 2, cast(s32)(SCREEN_HEIGHT - font_size) / 2, xx font_size, BLACK);
+            DrawText("PAUSED", (SCREEN_WIDTH - text_width) / 2, cast(s32)(SCREEN_HEIGHT - font_size) / 2, xx font_size, WHITE);
         }
             
     }
