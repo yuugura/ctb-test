@@ -20,7 +20,7 @@ OBJECT_RADIUS       :: 64.0;
 OSU_PLAYFIELD_WIDTH :: 512.0;
 OSU_TO_SCREEN       :: SCREEN_WIDTH / OSU_PLAYFIELD_WIDTH;
 
-MAX_FRUITS      :: 16;
+MAX_FRUITS      :: 32;
 FRUIT_FALL_SPEED :: 200.0; // pixels per second
 
 Keybind_Scheme :: enum {
@@ -39,11 +39,6 @@ Fruit :: struct {
     alive: bool;
 }
 
-Fruit_Spawn :: struct {
-    x_fraction: float; // 0..1 across screen width
-    time:       float; // seconds since loop start
-}
-
 Catcher :: struct {
     position: Vector2;
     size_screen: Vector2;
@@ -56,22 +51,11 @@ Difficulty :: struct {
     circle_size: float = 4; // Auto: cs 4 by default cuz who tf plays cs 5
 }
 
-// Auto: temp spawn list
-SPAWN_LIST :: Fruit_Spawn.[
-    .{0.10, 0.0},
-    .{0.50, 0.8},
-    .{0.90, 1.6},
-    .{0.30, 2.4},
-    .{0.70, 3.2},
-];
-
-LOOP_DURATION :: 4.0; // must be > last SPAWN_LIST entry's time
-
 Game :: struct {
     fruits: [MAX_FRUITS] Fruit;
-    run_time:          float;
-    previous_loop_time: float;
-    spawn_cursor:       int;
+    beatmap:    Osu_File;
+    hit_cursor: int;
+    run_time_ms: float;
 
     caught_count: int;
     missed_count: int;
@@ -90,11 +74,14 @@ Game :: struct {
     state: Game_State;
 }
 
-init_game :: () -> Game {
+init_game :: (osu_path: string) -> Game {
     game: Game;
     game.catcher.position.x = cast(float) SCREEN_WIDTH / 2.0;
 
     game.catcher_texture = LoadTexture(get_c_string("resources/catcher.png"));
+
+    game.beatmap = read_osu_file(osu_path);
+    game.difficulty.circle_size = game.beatmap.difficulty_info.CircleSize;
 
     return game;
 }
@@ -129,18 +116,18 @@ update_catcher :: (using game: *Game, dt: float) {
 
 update_fruits :: (using game: *Game, dt: float)
 {
-    // 4. Spawn-timer update (hardcoded, looping spawn list)
-    run_time += dt;
-    loop_time := fmod_cycling(run_time, LOOP_DURATION);
+    // 4. Spawn-timer update -- walk the beatmap's hit objects in time order,
+    // spawning a fruit for each hit circle we've now reached. Sliders and
+    // spinners are skipped for now (no droplet-stream simulation yet).
+    run_time_ms += dt * 1000.0;
 
-    if spawn_cursor < SPAWN_LIST.count && loop_time >= SPAWN_LIST[spawn_cursor].time {
-        spawn_fruit_at(*fruits, SPAWN_LIST[spawn_cursor].x_fraction * SCREEN_WIDTH, fruit_radius_screen);
-        spawn_cursor += 1;
+    while hit_cursor < beatmap.hit_objects.count && cast(float) beatmap.hit_objects[hit_cursor].time <= run_time_ms {
+        hit_object := beatmap.hit_objects[hit_cursor];
+        if hit_object.type & xx Osu_Hit_Object_Type_Flag.Hit_Circle {
+            spawn_fruit_at(*fruits, cast(float) hit_object.x * OSU_TO_SCREEN, fruit_radius_screen);
+        }
+        hit_cursor += 1;
     }
-    if loop_time < previous_loop_time {
-        spawn_cursor = 0;
-    }
-    previous_loop_time = loop_time;
 
     // 5. Fruit physics
     for * fruit: fruits {
