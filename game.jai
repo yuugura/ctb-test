@@ -1,5 +1,6 @@
 #load "util.jai";
 #load "osu.jai";
+#load "slider.jai";
 
 CATCHER_WALK_SPEED_OSU :: 500.0;  // osu!pixels/sec, from ppy/osu Catcher.BASE_WALK_SPEED
 CATCHER_DASH_SPEED_OSU :: 1000.0; // osu!pixels/sec, from ppy/osu Catcher.BASE_DASH_SPEED
@@ -57,7 +58,9 @@ Fruit :: struct {
     y:     float;
     alive: bool;
 
-    // Hyperdash info, copied from the source Osu_Hit_Object at spawn time.
+    is_droplet: bool; // slider tick ("big droplet") -- drawn smaller than a fruit
+
+    // Hyperdash info, copied from the source Catch_Object at spawn time.
     is_hyper:       bool;
     hyper_target_x: float; // screen-space x of the fruit this should carry the catcher to
     hyper_speed:    float; // screen-space px/sec required to reach it in time
@@ -82,7 +85,8 @@ Difficulty :: struct {
 Game :: struct {
     fruits: [MAX_FRUITS] Fruit;
     beatmap:    Osu_File;
-    hit_cursor: int;
+    catch_objects: [..] Catch_Object; // hit circles + flattened slider heads/ticks/repeats/tails, time-ordered
+    hit_cursor: int; // index into catch_objects
     run_time_ms: float;
 
     caught_count: int;
@@ -111,11 +115,12 @@ init_game :: (osu_path: string) -> Game {
     game.catcher_texture = LoadTexture(get_c_string("resources/catcher.png"));
 
     game.beatmap = read_osu_file(osu_path);
-    if game.beatmap.hit_objects.count > 0 {
+    game.catch_objects = build_catch_objects(*game.beatmap);
+    if game.catch_objects.count > 0 {
         game.difficulty.circle_size = game.beatmap.difficulty_info.CircleSize;
 
         game.difficulty.approach_rate = game.beatmap.difficulty_info.ApproachRate;
-        if game.difficulty.approach_rate <= 0 {
+        if game.difficulty.approach_rate < 0 {
             // Old-format beatmaps have no ApproachRate key -- real osu falls
             // back to OverallDifficulty in that case.
             game.difficulty.approach_rate = game.beatmap.difficulty_info.OverallDifficulty;
@@ -148,11 +153,15 @@ fruit_and_catcher_scale_from_cs :: (cs: float) -> (fruit_radius_osu: float, catc
 }
 
 // Ported from ppy/osu's CatchBeatmapProcessor.initialiseHyperDash: flags a
-// Hit_Circle as a hyperdash source when even a full-speed dash can't cover
-// the gap to the next Hit_Circle in time, and records the forced speed
-// (Catcher.OnNewResult's velocity formula) needed to just make it. Computed
-// once here from the map's own Circle Size, matching real osu -- hyperdash
-// layout doesn't react to the runtime Circle Size (-/+) tweak.
+// catch object (hit circle, or a slider head/tick/repeat/tail) as a
+// hyperdash source when even a full-speed dash can't cover the gap to the
+// next one in time, and records the forced speed (Catcher.OnNewResult's
+// velocity formula) needed to just make it. Runs over the full flattened
+// catch_objects list -- exactly like real osu, slider ticks ("big droplets")
+// are palpable objects and participate in this gap calculation the same as
+// hit circles and slider heads/tails. Computed once here from the map's own
+// Circle Size, matching real osu -- hyperdash layout doesn't react to the
+// runtime Circle Size (-/+) tweak.
 compute_hyperdash_targets :: (using game: *Game) {
     cs := cast(float) difficulty.circle_size;
     _, catcher_scale_osu := fruit_and_catcher_scale_from_cs(cs);
@@ -162,40 +171,33 @@ compute_hyperdash_targets :: (using game: *Game) {
     // convert to match.
     dash_speed_per_ms := CATCHER_DASH_SPEED_OSU / 1000.0;
 
-    last_index: int = -1; // index into beatmap.hit_objects of the previous Hit_Circle
     last_direction := 0;
     last_excess := half_catcher_width;
 
-    for i: 0..beatmap.hit_objects.count - 1 {
-        current := *beatmap.hit_objects[i];
-        if !has_hit_object_type(current, .Hit_Circle) continue;
+    for i: 1..catch_objects.count - 1 {
+        current  := *catch_objects[i];
+        previous := *catch_objects[i - 1];
 
-        if last_index >= 0 {
-            previous := *beatmap.hit_objects[last_index];
+        this_direction := ifx current.x > previous.x then 1 else -1;
+        dx := current.x - previous.x;
+        dt := current.time - previous.time;
 
-            this_direction := ifx current.x > previous.x then 1 else -1;
-            dx := cast(float) (current.x - previous.x);
-            dt := cast(float) (current.time - previous.time);
+        time_to_next     := dt - 1000.0 / 60.0 / 4.0;
+        excess           := ifx last_direction == this_direction then last_excess else half_catcher_width;
+        distance_to_next := abs(dx) - excess;
+        distance_to_hyper := time_to_next * dash_speed_per_ms - distance_to_next;
 
-            time_to_next     := dt - 1000.0 / 60.0 / 4.0;
-            excess           := ifx last_direction == this_direction then last_excess else half_catcher_width;
-            distance_to_next := abs(dx) - excess;
-            distance_to_hyper := time_to_next * dash_speed_per_ms - distance_to_next;
-
-            if distance_to_hyper < 0 {
-                previous.is_hyperdash = true;
-                previous.hyperdash_target_x = current.x;
-                // px/ms -> px/sec, to match CATCHER_*_SPEED_OSU's units.
-                previous.hyperdash_speed = (abs(dx) / max(1.0, dt - 1000.0 / 60.0)) * 1000.0;
-                last_excess = half_catcher_width;
-            } else {
-                last_excess = clamp(distance_to_hyper, 0.0, half_catcher_width);
-            }
-
-            last_direction = this_direction;
+        if distance_to_hyper < 0 {
+            previous.is_hyperdash = true;
+            previous.hyperdash_target_x = current.x;
+            // px/ms -> px/sec, to match CATCHER_*_SPEED_OSU's units.
+            previous.hyperdash_speed = (abs(dx) / max(1.0, dt - 1000.0 / 60.0)) * 1000.0;
+            last_excess = half_catcher_width;
+        } else {
+            last_excess = clamp(distance_to_hyper, 0.0, half_catcher_width);
         }
 
-        last_index = i;
+        last_direction = this_direction;
     }
 }
 
@@ -244,32 +246,32 @@ update_catcher :: (using game: *Game, dt: float) {
 
 update_fruits :: (using game: *Game, dt: float)
 {
-    // 4. Spawn-timer update -- walk the beatmap's hit objects in time order,
-    // spawning each fruit `preempt_ms` (from beatmap AR) before its hit time
-    // so it falls into place exactly on time. Sliders and spinners are
-    // skipped for now (no droplet-stream simulation yet).
+    // 4. Spawn-timer update -- walk the flattened catch-object list (hit
+    // circles plus slider heads/ticks/repeats/tails) in time order, spawning
+    // each fruit/droplet `preempt_ms` (from beatmap AR) before its hit time
+    // so it falls into place exactly on time. Spinners are skipped.
     run_time_ms += dt * 1000.0;
 
-    while hit_cursor < beatmap.hit_objects.count &&
-          cast(float) beatmap.hit_objects[hit_cursor].time - preempt_ms <= run_time_ms {
-        hit_object := *beatmap.hit_objects[hit_cursor];
-        if has_hit_object_type(hit_object, .Hit_Circle) {
-            spawn_time_ms := cast(float) hit_object.time - preempt_ms;
-            // Usually 0 -- only nonzero for early notes whose ideal spawn
-            // time already passed before this frame (e.g. within the first
-            // preempt_ms of the map), so they start partway down instead of
-            // spawning fresh at the top and arriving late.
-            elapsed_ms := run_time_ms - spawn_time_ms;
-            initial_y  := -fruit_radius_screen + fruit_fall_speed * (elapsed_ms / 1000.0);
+    while hit_cursor < catch_objects.count &&
+          catch_objects[hit_cursor].time - preempt_ms <= run_time_ms {
+        obj := *catch_objects[hit_cursor];
 
-            hyper_target_x_screen := osu_to_screen(cast(float) hit_object.hyperdash_target_x);
-            hyper_speed_screen    := osu_to_screen(hit_object.hyperdash_speed);
+        spawn_time_ms := obj.time - preempt_ms;
+        // Usually 0 -- only nonzero for early notes whose ideal spawn time
+        // already passed before this frame (e.g. within the first
+        // preempt_ms of the map), so they start partway down instead of
+        // spawning fresh at the top and arriving late.
+        elapsed_ms := run_time_ms - spawn_time_ms;
+        initial_y  := -fruit_radius_screen + fruit_fall_speed * (elapsed_ms / 1000.0);
 
-            if !spawn_fruit_at(*fruits, osu_to_screen(cast(float) hit_object.x), initial_y, hit_object.is_hyperdash, hyper_target_x_screen, hyper_speed_screen) {
-                // Pool was full -- count it as a miss instead of silently losing the note.
-                missed_count += 1;
-            }
+        hyper_target_x_screen := osu_to_screen(obj.hyperdash_target_x);
+        hyper_speed_screen    := osu_to_screen(obj.hyperdash_speed);
+
+        if !spawn_fruit_at(*fruits, osu_to_screen(obj.x), initial_y, obj.is_hyperdash, hyper_target_x_screen, hyper_speed_screen, obj.kind == .Droplet) {
+            // Pool was full -- count it as a miss instead of silently losing the note.
+            missed_count += 1;
         }
+
         hit_cursor += 1;
     }
 
@@ -277,6 +279,14 @@ update_fruits :: (using game: *Game, dt: float)
     for * fruit: fruits {
         if fruit.alive fruit.y += fruit_fall_speed * dt;
     }
+}
+
+// Slider ticks ("big droplets") are drawn and caught smaller than fruits,
+// matching real osu!catch.
+DROPLET_RADIUS_FRACTION :: 0.5;
+
+fruit_screen_radius :: (using game: *Game, fruit: *Fruit) -> float {
+    return ifx fruit.is_droplet then fruit_radius_screen * DROPLET_RADIUS_FRACTION else fruit_radius_screen;
 }
 
 catching_fruits :: (using game: *Game) {
@@ -291,8 +301,9 @@ catching_fruits :: (using game: *Game) {
     for * fruit: fruits {
         if !fruit.alive continue;
 
-        fruit_top    := fruit.y - fruit_radius_screen;
-        fruit_bottom := fruit.y + fruit_radius_screen;
+        radius := fruit_screen_radius(game, fruit);
+        fruit_top    := fruit.y - radius;
+        fruit_bottom := fruit.y + radius;
 
         vertical_overlap   := fruit_bottom >= catcher_top && fruit_top <= catcher_bottom;
         horizontal_overlap := fruit.x >= catch_min_x && fruit.x <= catch_max_x;
@@ -305,19 +316,20 @@ catching_fruits :: (using game: *Game) {
                 catcher.hyper_target_x = fruit.hyper_target_x;
                 catcher.hyper_speed = fruit.hyper_speed;
             }
-        } else if fruit.y - fruit_radius_screen > SCREEN_HEIGHT {
+        } else if fruit.y - radius > SCREEN_HEIGHT {
             fruit.alive = false;
             missed_count += 1;
         }
     }
 }
 
-spawn_fruit_at :: (fruits: *[MAX_FRUITS] Fruit, x: float, y: float, is_hyper: bool, hyper_target_x: float, hyper_speed: float) -> bool {
+spawn_fruit_at :: (fruits: *[MAX_FRUITS] Fruit, x: float, y: float, is_hyper: bool, hyper_target_x: float, hyper_speed: float, is_droplet: bool) -> bool {
     for * fruit: fruits.* {
         if fruit.alive continue;
         fruit.x = x;
         fruit.y = y;
         fruit.alive = true;
+        fruit.is_droplet = is_droplet;
         fruit.is_hyper = is_hyper;
         fruit.hyper_target_x = hyper_target_x;
         fruit.hyper_speed = hyper_speed;
@@ -368,14 +380,16 @@ update_game :: (using game: *Game) {
 render_game :: (using game: *Game) {
     DrawTextureEx(catcher_texture, Vector2.{ catcher.position.x, catcher.position.y }, 0, catcher.draw_scale, WHITE);
 
-    HYPER_RING_THICKNESS_FRACTION :: 0.3; // fraction of fruit_radius_screen
+    HYPER_RING_THICKNESS_FRACTION :: 0.3; // fraction of the fruit's own radius
 
-    for fruit: fruits {
+    for * fruit: fruits {
         if !fruit.alive continue;
-        DrawCircleV(Vector2.{ fruit.x, fruit.y }, fruit_radius_screen, WHITE);
+        radius := fruit_screen_radius(game, fruit);
+        color := ifx fruit.is_droplet then SKYBLUE else WHITE;
+        DrawCircleV(Vector2.{ fruit.x, fruit.y }, radius, color);
         if fruit.is_hyper {
-            thickness := fruit_radius_screen * HYPER_RING_THICKNESS_FRACTION;
-            DrawRing(Vector2.{ fruit.x, fruit.y }, fruit_radius_screen - thickness / 2.0, fruit_radius_screen + thickness / 2.0, 0, 360, 36, RED);
+            thickness := radius * HYPER_RING_THICKNESS_FRACTION;
+            DrawRing(Vector2.{ fruit.x, fruit.y }, radius - thickness / 2.0, radius + thickness / 2.0, 0, 360, 36, RED);
         }
     }
 }
