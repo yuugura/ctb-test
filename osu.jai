@@ -137,6 +137,12 @@ Osu_Hit_Object :: struct
     slider_params: Osu_Slider;
     other_params: Osu_Additional_Param;
     hit_sample: Osu_Hit_Sample;
+
+    // Gameplay annotations filled in by compute_hyperdash_targets (game.jai),
+    // not by parsing -- only meaningful when is_hyperdash is true.
+    is_hyperdash:       bool;
+    hyperdash_target_x: int;
+    hyperdash_speed:    float;
 }
 
 Osu_File :: struct

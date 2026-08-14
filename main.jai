@@ -40,6 +40,7 @@ main :: () {
         DrawText(get_c_string(tprint("Circle Size: % (- / +)", difficulty.circle_size)), 10, 10, 20, WHITE);
         DrawText(get_c_string(tprint("Keybinds: % (Tab to switch)", scheme_name)), 10, 30, 20, WHITE);
         DrawText(get_c_string(tprint("Caught: %   Missed: %", caught_count, missed_count)), 10, 50, 20, WHITE);
+        DrawText(get_c_string(tprint("Approach Rate: % (preempt %ms)", difficulty.approach_rate, cast(int) preempt_ms)), 10, 70, 20, WHITE);
 
         if game.state == .Paused {
             font_size := 50;
