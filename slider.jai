@@ -13,8 +13,9 @@
 // participate in hyperdash gap calculations exactly like hit circles do.
 
 Catch_Object_Kind :: enum u8 {
-    Fruit;   // hit circles, slider heads/repeats/tails
-    Droplet; // slider ticks ("big droplets")
+    Fruit;       // hit circles, slider heads/repeats/tails
+    Droplet;     // slider ticks ("big droplets")
+    TinyDroplet; // fills >80ms gaps between head/tick/tail along a slider's path
 }
 
 Catch_Object :: struct {
@@ -335,10 +336,50 @@ slider_position_at :: (path: *Slider_Path, progress: float) -> Vector2 {
     return path.points[path.points.count - 1];
 }
 
+// Fills the time gap between two consecutively-emitted slider events (within
+// the same span) with TinyDroplets, mirroring ppy/osu's JuiceStream.createTicks:
+// gaps over 80ms get subdivided into pieces no larger than 100ms (halving the
+// gap until it fits), each placed by interpolating physical path progress
+// linearly against elapsed time between the two surrounding events. Since
+// `next_physical_progress` already encodes direction (it's the same
+// physical-progress space regardless of which way the span is travelling),
+// no separate "reversed" handling is needed here.
+append_tiny_droplets :: (out: *[..] Catch_Object, path: *Slider_Path, last_time: float, last_physical_progress: float, next_time: float, next_physical_progress: float) {
+    gap := next_time - last_time;
+    if gap <= 80.0 return;
+
+    spacing := gap;
+    while spacing > 100.0 spacing /= 2.0;
+
+    t := spacing;
+    while t < gap {
+        frac := t / gap;
+        physical_progress := last_physical_progress + frac * (next_physical_progress - last_physical_progress);
+        pos := slider_position_at(path, physical_progress);
+        add_catch_object(out, last_time + t, pos.x, .TinyDroplet);
+        t += spacing;
+    }
+}
+
+// Physical path progress (0=head end, 1=tail end) at a span's own start or
+// end. A non-reversed (even) span starts at 0 and ends at 1; a reversed
+// (odd) span starts at 1 and ends at 0. Pulled into one formula, rather than
+// two independently-written `ifx reversed` expressions at each call site, so
+// the "a span's boundary always meets the next span's at the same physical
+// point" invariant append_slider_catch_objects relies on can't drift out of
+// sync if one of the two sites is edited without the other.
+progress_at_span_boundary :: (reversed: bool, at_end: bool) -> float {
+    return ifx reversed == at_end then 0.0 else 1.0;
+}
+
 // --- Slider -> catch-object flattening --------------------------------------
 // Mirrors ppy/osu's SliderEventGenerator: a Fruit at the head, a Droplet at
-// every tick_distance along each span, and a Fruit at every repeat and at
-// the final tail.
+// every tick_distance along each span, a Fruit at every repeat and at the
+// final tail, and TinyDroplets filling any >80ms gap left between them (see
+// append_tiny_droplets). A span's local progress 0/1 always coincides
+// exactly with the previous/next span's boundary object in both time and
+// physical position, so doing the gap-fill per span already covers repeat
+// boundaries too -- no separate cross-span handling needed.
 append_slider_catch_objects :: (beatmap: *Osu_File, hit_object: *Osu_Hit_Object, out: *[..] Catch_Object) {
     path := build_slider_path(hit_object);
     defer free_slider_path(*path);
@@ -346,16 +387,29 @@ append_slider_catch_objects :: (beatmap: *Osu_File, hit_object: *Osu_Hit_Object,
     velocity, span_duration, tick_distance := slider_timing(beatmap, hit_object);
     span_count := max(1, hit_object.slider_params.slides);
     field_length := hit_object.slider_params.length;
+    min_distance_from_end := velocity * 10.0; // osu skips ticks within the last 10ms of a span
 
     add_catch_object(out, cast(float) hit_object.time, path.points[0].x, .Fruit);
 
-    if tick_distance > 0 && field_length > 0 {
-        min_distance_from_end := velocity * 10.0; // osu skips ticks within the last 10ms of a span
+    if field_length <= 0 {
+        // Degenerate (zero/negative-length) slider -- the path collapses to
+        // a single point, so every span's boundary would land on the same
+        // instant-and-position. Emit exactly one tail, matching real osu's
+        // handling of a malformed length, instead of looping span_count
+        // times over a collapsed path.
+        end_time := cast(float) hit_object.time + span_duration * cast(float) span_count;
+        add_catch_object(out, end_time, path.points[0].x, .Fruit);
+        return;
+    }
 
-        for span: 0..span_count - 1 {
-            span_start_time := cast(float) hit_object.time + span_duration * cast(float) span;
-            reversed := (span % 2) == 1;
+    for span: 0..span_count - 1 {
+        span_start_time := cast(float) hit_object.time + span_duration * cast(float) span;
+        reversed := (span % 2) == 1;
 
+        last_time := span_start_time;
+        last_physical_progress := progress_at_span_boundary(reversed, false); // where this span physically begins
+
+        if tick_distance > 0 {
             distance := tick_distance;
             while distance < field_length - min_distance_from_end {
                 // path_progress is elapsed-time fraction within the span --
@@ -364,21 +418,26 @@ append_slider_catch_objects :: (beatmap: *Osu_File, hit_object: *Osu_Hit_Object,
                 // path itself, which *does* flip for a reversed span.
                 path_progress := distance / field_length;
                 physical_progress := ifx reversed then 1.0 - path_progress else path_progress;
+                tick_time := span_start_time + path_progress * span_duration;
+
+                append_tiny_droplets(out, *path, last_time, last_physical_progress, tick_time, physical_progress);
 
                 pos := slider_position_at(*path, physical_progress);
-                add_catch_object(out, span_start_time + path_progress * span_duration, pos.x, .Droplet);
+                add_catch_object(out, tick_time, pos.x, .Droplet);
+
+                last_time = tick_time;
+                last_physical_progress = physical_progress;
 
                 distance += tick_distance;
             }
-
-            end_progress := ifx reversed then 0.0 else 1.0;
-            end_pos := slider_position_at(*path, end_progress);
-            add_catch_object(out, span_start_time + span_duration, end_pos.x, .Fruit);
         }
-    } else {
-        // Degenerate (zero-length or zero-tick-distance) slider -- still
-        // spawn a tail so it remains catchable.
-        end_time := cast(float) hit_object.time + span_duration * cast(float) span_count;
-        add_catch_object(out, end_time, path.points[0].x, .Fruit);
+
+        end_time := span_start_time + span_duration;
+        end_progress := progress_at_span_boundary(reversed, true);
+
+        append_tiny_droplets(out, *path, last_time, last_physical_progress, end_time, end_progress);
+
+        end_pos := slider_position_at(*path, end_progress);
+        add_catch_object(out, end_time, end_pos.x, .Fruit);
     }
 }

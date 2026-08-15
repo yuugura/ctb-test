@@ -30,7 +30,10 @@ has_hit_object_type :: (hit_object: *Osu_Hit_Object, flag: Osu_Hit_Object_Type_F
     return (hit_object.type & xx flag) != 0;
 }
 
-MAX_FRUITS :: 48;
+// Bumped from 48 -- tiny droplets can put several nested objects from a
+// single slider alive in quick succession, on top of this map's already
+// dense overlapping preempt windows.
+MAX_FRUITS :: 128;
 
 // osu! AR -> preempt-time formula (osu.ppy.sh/wiki/en/Beatmap/Approach_rate).
 // preempt_ms is how long before a hit object's time its fruit must spawn
@@ -58,7 +61,7 @@ Fruit :: struct {
     y:     float;
     alive: bool;
 
-    is_droplet: bool; // slider tick ("big droplet") -- drawn smaller than a fruit
+    kind: Catch_Object_Kind; // Fruit, Droplet ("big droplet"), or TinyDroplet -- drives size/color
 
     // Hyperdash info, copied from the source Catch_Object at spawn time.
     is_hyper:       bool;
@@ -156,12 +159,14 @@ fruit_and_catcher_scale_from_cs :: (cs: float) -> (fruit_radius_osu: float, catc
 // catch object (hit circle, or a slider head/tick/repeat/tail) as a
 // hyperdash source when even a full-speed dash can't cover the gap to the
 // next one in time, and records the forced speed (Catcher.OnNewResult's
-// velocity formula) needed to just make it. Runs over the full flattened
-// catch_objects list -- exactly like real osu, slider ticks ("big droplets")
-// are palpable objects and participate in this gap calculation the same as
-// hit circles and slider heads/tails. Computed once here from the map's own
-// Circle Size, matching real osu -- hyperdash layout doesn't react to the
-// runtime Circle Size (-/+) tweak.
+// velocity formula) needed to just make it. Runs over the "palpable" subset
+// of catch_objects -- Fruit and Droplet ("big droplet") -- exactly like real
+// osu, slider ticks participate in this gap calculation the same as hit
+// circles and slider heads/tails; TinyDroplets never need to be caught to
+// stay on combo, so they're excluded (CatchBeatmapProcessor's own
+// `Fruit || (Droplet && not TinyDroplet)` filter). Computed once here from
+// the map's own Circle Size, matching real osu -- hyperdash layout doesn't
+// react to the runtime Circle Size (-/+) tweak.
 compute_hyperdash_targets :: (using game: *Game) {
     cs := cast(float) difficulty.circle_size;
     _, catcher_scale_osu := fruit_and_catcher_scale_from_cs(cs);
@@ -173,10 +178,18 @@ compute_hyperdash_targets :: (using game: *Game) {
 
     last_direction := 0;
     last_excess := half_catcher_width;
+    previous_index := -1; // index of the last non-TinyDroplet object seen
 
-    for i: 1..catch_objects.count - 1 {
+    for i: 0..catch_objects.count - 1 {
+        if catch_objects[i].kind == .TinyDroplet continue;
+        if previous_index < 0 {
+            previous_index = i;
+            continue;
+        }
+
         current  := *catch_objects[i];
-        previous := *catch_objects[i - 1];
+        previous := *catch_objects[previous_index];
+        previous_index = i;
 
         this_direction := ifx current.x > previous.x then 1 else -1;
         dx := current.x - previous.x;
@@ -267,9 +280,12 @@ update_fruits :: (using game: *Game, dt: float)
         hyper_target_x_screen := osu_to_screen(obj.hyperdash_target_x);
         hyper_speed_screen    := osu_to_screen(obj.hyperdash_speed);
 
-        if !spawn_fruit_at(*fruits, osu_to_screen(obj.x), initial_y, obj.is_hyperdash, hyper_target_x_screen, hyper_speed_screen, obj.kind == .Droplet) {
-            // Pool was full -- count it as a miss instead of silently losing the note.
-            missed_count += 1;
+        if !spawn_fruit_at(*fruits, osu_to_screen(obj.x), initial_y, obj.is_hyperdash, hyper_target_x_screen, hyper_speed_screen, obj.kind) {
+            // Pool was full -- count it as a miss instead of silently losing
+            // the note, except for TinyDroplets: like real osu, they don't
+            // need to be caught to stay on combo, so losing one to a full
+            // pool isn't a "miss" the player could have prevented.
+            if obj.kind != .TinyDroplet missed_count += 1;
         }
 
         hit_cursor += 1;
@@ -281,12 +297,18 @@ update_fruits :: (using game: *Game, dt: float)
     }
 }
 
-// Slider ticks ("big droplets") are drawn and caught smaller than fruits,
-// matching real osu!catch.
-DROPLET_RADIUS_FRACTION :: 0.5;
+// Slider ticks/tiny droplets are drawn and caught smaller than fruits,
+// matching real osu!catch (DropletPiece is half an OBJECT_RADIUS fruit;
+// DrawableTinyDroplet halves that again).
+DROPLET_RADIUS_FRACTION      :: 0.5;
+TINY_DROPLET_RADIUS_FRACTION :: 0.25;
 
 fruit_screen_radius :: (using game: *Game, fruit: *Fruit) -> float {
-    return ifx fruit.is_droplet then fruit_radius_screen * DROPLET_RADIUS_FRACTION else fruit_radius_screen;
+    if fruit.kind == {
+        case .Droplet;     return fruit_radius_screen * DROPLET_RADIUS_FRACTION;
+        case .TinyDroplet; return fruit_radius_screen * TINY_DROPLET_RADIUS_FRACTION;
+    }
+    return fruit_radius_screen;
 }
 
 catching_fruits :: (using game: *Game) {
@@ -318,18 +340,20 @@ catching_fruits :: (using game: *Game) {
             }
         } else if fruit.y - radius > SCREEN_HEIGHT {
             fruit.alive = false;
-            missed_count += 1;
+            // TinyDroplets don't need to be caught to stay on combo in real
+            // osu!catch -- letting one fall past isn't a "miss".
+            if fruit.kind != .TinyDroplet missed_count += 1;
         }
     }
 }
 
-spawn_fruit_at :: (fruits: *[MAX_FRUITS] Fruit, x: float, y: float, is_hyper: bool, hyper_target_x: float, hyper_speed: float, is_droplet: bool) -> bool {
+spawn_fruit_at :: (fruits: *[MAX_FRUITS] Fruit, x: float, y: float, is_hyper: bool, hyper_target_x: float, hyper_speed: float, kind: Catch_Object_Kind) -> bool {
     for * fruit: fruits.* {
         if fruit.alive continue;
         fruit.x = x;
         fruit.y = y;
         fruit.alive = true;
-        fruit.is_droplet = is_droplet;
+        fruit.kind = kind;
         fruit.is_hyper = is_hyper;
         fruit.hyper_target_x = hyper_target_x;
         fruit.hyper_speed = hyper_speed;
@@ -385,7 +409,7 @@ render_game :: (using game: *Game) {
     for * fruit: fruits {
         if !fruit.alive continue;
         radius := fruit_screen_radius(game, fruit);
-        color := ifx fruit.is_droplet then SKYBLUE else WHITE;
+        color := ifx fruit.kind == .Fruit then WHITE else SKYBLUE;
         DrawCircleV(Vector2.{ fruit.x, fruit.y }, radius, color);
         if fruit.is_hyper {
             thickness := radius * HYPER_RING_THICKNESS_FRACTION;
